@@ -1,0 +1,30 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Environment variables (secrets)
+.env
+
+# Test and linting cache
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+.agents/external-docs
+guide.md
+.agents/reports
+
+# Database
+*.db
+
+# Course materials (optional - remove if you want to track)
+agentic-coding-course-main/

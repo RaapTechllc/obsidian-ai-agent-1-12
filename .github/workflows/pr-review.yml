@@ -1,0 +1,175 @@
+# Module 8 - Agentic Coding in GitHub
+# PR Review Workflow - Auto-review pull requests with AI
+name: PR Review Agent
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+  pull_request_review_comment:
+    types: [created]
+
+jobs:
+  auto-review:
+    # Run on new PRs or when code is pushed
+    if: github.event_name == 'pull_request'
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Get PR diff
+        id: diff
+        run: |
+          # Get the diff between base and head
+          git diff origin/${{ github.base_ref }}...HEAD > pr_diff.txt
+          echo "diff_file=pr_diff.txt" >> $GITHUB_OUTPUT
+
+      - name: Run PR review
+        id: review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          PR_BODY="${{ github.event.pull_request.body }}"
+
+          PROMPT="Review this pull request and provide feedback.
+
+          PR Title: $PR_TITLE
+          PR Description: $PR_BODY
+
+          Diff file is at: pr_diff.txt
+
+          Please review for:
+          1. Code correctness and logic errors
+          2. Type safety and adherence to project conventions (see CLAUDE.md)
+          3. Performance implications
+          4. Security considerations
+          5. Test coverage
+
+          Use the /validation:code-review command format for your review.
+          Be concise but thorough. Focus on actionable feedback."
+
+          # Run Claude Code
+          OUTPUT=$(claude --print "$PROMPT" 2>&1) || true
+
+          # Save output
+          echo "output<<EOF" >> $GITHUB_OUTPUT
+          echo "$OUTPUT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Post review comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const output = `${{ steps.review.outputs.output }}`;
+
+            const body = `## AI Code Review
+
+            ${output}
+
+            ---
+            *Automated review by Claude Code*`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+
+  respond-to-comment:
+    # Respond to review comments with /agent command
+    if: |
+      github.event_name == 'pull_request_review_comment' &&
+      contains(github.event.comment.body, '/agent')
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Process review comment
+        id: process
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          COMMENT="${{ github.event.comment.body }}"
+          FILE_PATH="${{ github.event.comment.path }}"
+          DIFF_HUNK="${{ github.event.comment.diff_hunk }}"
+
+          PROMPT="Address this code review comment:
+
+          Comment: $COMMENT
+          File: $FILE_PATH
+          Code Context:
+          $DIFF_HUNK
+
+          Analyze the feedback and suggest improvements or explain the code."
+
+          OUTPUT=$(claude --print "$PROMPT" 2>&1) || true
+
+          echo "output<<EOF" >> $GITHUB_OUTPUT
+          echo "$OUTPUT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Reply to comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const output = `${{ steps.process.outputs.output }}`;
+
+            await github.rest.pulls.createReplyForReviewComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              comment_id: context.payload.comment.id,
+              body: output
+            });

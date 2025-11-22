@@ -1,0 +1,134 @@
+# Module 8 - Agentic Coding in GitHub
+# Issue Agent Workflow - Triggered by commands in issue comments
+name: Issue Agent
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  agent:
+    # Only run on issue comments (not PR comments) with /agent command
+    if: |
+      !github.event.issue.pull_request &&
+      contains(github.event.comment.body, '/agent')
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Parse agent command
+        id: parse
+        run: |
+          COMMENT="${{ github.event.comment.body }}"
+
+          # Extract command after /agent
+          if [[ "$COMMENT" =~ /agent[[:space:]]+(plan|implement|review|help)(.*)$ ]]; then
+            echo "command=${BASH_REMATCH[1]}" >> $GITHUB_OUTPUT
+            echo "args=${BASH_REMATCH[2]}" >> $GITHUB_OUTPUT
+          else
+            echo "command=help" >> $GITHUB_OUTPUT
+            echo "args=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Run agent command
+        id: agent
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          COMMAND="${{ steps.parse.outputs.command }}"
+          ARGS="${{ steps.parse.outputs.args }}"
+          ISSUE_TITLE="${{ github.event.issue.title }}"
+          ISSUE_BODY="${{ github.event.issue.body }}"
+
+          # Create prompt based on command
+          case "$COMMAND" in
+            plan)
+              PROMPT="Create a detailed implementation plan for this issue.
+
+          Issue Title: $ISSUE_TITLE
+          Issue Description: $ISSUE_BODY
+          Additional Context: $ARGS
+
+          Use the /core_piv_loop:plan-feature command to create a comprehensive plan."
+              ;;
+            implement)
+              PROMPT="Implement the changes described in this issue.
+
+          Issue Title: $ISSUE_TITLE
+          Issue Description: $ISSUE_BODY
+          Additional Context: $ARGS
+
+          Follow the existing plan if available, or create one first."
+              ;;
+            review)
+              PROMPT="Review the codebase related to this issue and provide analysis.
+
+          Issue Title: $ISSUE_TITLE
+          Issue Description: $ISSUE_BODY
+          Additional Context: $ARGS"
+              ;;
+            *)
+              PROMPT="Available commands:
+          - /agent plan - Create implementation plan
+          - /agent implement - Implement changes
+          - /agent review - Review related code
+
+          Issue: $ISSUE_TITLE"
+              ;;
+          esac
+
+          # Run Claude Code and capture output
+          OUTPUT=$(claude --print "$PROMPT" 2>&1) || true
+
+          # Save output for comment
+          echo "output<<EOF" >> $GITHUB_OUTPUT
+          echo "$OUTPUT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Post result as comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const output = `${{ steps.agent.outputs.output }}`;
+            const command = `${{ steps.parse.outputs.command }}`;
+
+            const body = `## Agent Response (${command})
+
+            ${output}
+
+            ---
+            *Triggered by @${{ github.event.comment.user.login }}*`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });

@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$(cat <<''EOF''\nComplete Module 7.4: Apply system review findings to prevent future divergences\n\nApplied 13 documented improvements from the obsidian-get-context-tool system \nreview to eliminate ~18 minutes of troubleshooting in future implementations:\n\nCLAUDE.md updates (3 sections):\n- Add Vault Path Calculations standard (use vault_manager.vault_root)\n- Add Frontmatter Metadata Handling pattern (conditional dict building)\n- Add Date/Time Handling section (timezone-aware datetime requirement)\n\nplan-feature.md updates (4 additions):\n- Add Validate Common Patterns step for pre-implementation pattern discovery\n- Add Path Calculation GOTCHA example to task format guidelines\n- Add Metadata Dict Construction pattern to Patterns section\n- Enhance import order warning in Phase 3 Integration section\n\nexecute.md updates (4 improvements):\n- Add Pre-Flight Pattern Check step (1.5) before implementation\n- Add Verify Imports after Formatting step to catch import issues early\n- Add incremental type checking guidance (run mypy per-file)\n- Enhance test-first approach recommendation for complex logic\n\nExpected impact:\n- ~18 minutes saved on next tool implementation\n- 60-100 minutes total ROI over MVP tools\n- Systematic capture of institutional knowledge\n\n🤖 Generated with Claude Code\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")",
+      "Bash(gh pr list:*)",
+      "Bash(git rev-parse:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

@@ -1,0 +1,296 @@
+# Module 8 - Agentic Coding in GitHub
+# PIV Loop Workflow - Full Plan-Implement-Verify cycle
+name: PIV Loop
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  piv-loop:
+    # Trigger on /piv command in issue comments
+    if: |
+      !github.event.issue.pull_request &&
+      contains(github.event.comment.body, '/piv')
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Parse PIV command
+        id: parse
+        run: |
+          COMMENT="${{ github.event.comment.body }}"
+          ISSUE_NUMBER="${{ github.event.issue.number }}"
+
+          # Extract phase (plan, implement, verify, full)
+          if [[ "$COMMENT" =~ /piv[[:space:]]+(plan|implement|verify|full)?(.*)$ ]]; then
+            PHASE="${BASH_REMATCH[1]:-full}"
+            ARGS="${BASH_REMATCH[2]}"
+          else
+            PHASE="full"
+            ARGS=""
+          fi
+
+          # Generate branch name
+          BRANCH_NAME="agent/issue-${ISSUE_NUMBER}"
+
+          echo "phase=$PHASE" >> $GITHUB_OUTPUT
+          echo "args=$ARGS" >> $GITHUB_OUTPUT
+          echo "branch=$BRANCH_NAME" >> $GITHUB_OUTPUT
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Create feature branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          BRANCH="${{ steps.parse.outputs.branch }}"
+
+          # Create branch if it doesn't exist
+          if ! git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+            git checkout -b "$BRANCH"
+          else
+            git checkout "$BRANCH"
+            git pull origin "$BRANCH" || true
+          fi
+
+      - name: Acknowledge start
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const phase = `${{ steps.parse.outputs.phase }}`;
+            const branch = `${{ steps.parse.outputs.branch }}`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `Starting PIV Loop (phase: **${phase}**) on branch \`${branch}\`...\n\nI'll post updates as I progress.`
+            });
+
+      # PLAN PHASE
+      - name: Plan phase
+        id: plan
+        if: contains(fromJSON('["plan", "full"]'), steps.parse.outputs.phase)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          ISSUE_TITLE="${{ github.event.issue.title }}"
+          ISSUE_BODY="${{ github.event.issue.body }}"
+
+          PROMPT="You are working on issue #${{ github.event.issue.number }}: $ISSUE_TITLE
+
+          Issue Description:
+          $ISSUE_BODY
+
+          Execute the /core_piv_loop:plan-feature command to create a comprehensive implementation plan.
+          Save the plan to .agents/plans/ directory with appropriate naming."
+
+          OUTPUT=$(claude --print "$PROMPT" 2>&1) || true
+
+          echo "output<<EOF" >> $GITHUB_OUTPUT
+          echo "$OUTPUT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Post plan results
+        if: contains(fromJSON('["plan", "full"]'), steps.parse.outputs.phase)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const output = `${{ steps.plan.outputs.output }}`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `## Plan Phase Complete\n\n${output.substring(0, 60000)}`
+            });
+
+      # IMPLEMENT PHASE
+      - name: Implement phase
+        id: implement
+        if: contains(fromJSON('["implement", "full"]'), steps.parse.outputs.phase)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          ISSUE_TITLE="${{ github.event.issue.title }}"
+
+          # Find the plan file
+          PLAN_FILE=$(ls -t .agents/plans/*.md 2>/dev/null | head -1)
+
+          if [ -n "$PLAN_FILE" ]; then
+            PROMPT="Execute the implementation plan at $PLAN_FILE using /core_piv_loop:execute.
+
+            Follow the plan exactly and implement all required changes.
+            Commit your changes with descriptive messages."
+          else
+            PROMPT="Implement the feature described in issue: $ISSUE_TITLE
+
+            Create the necessary code changes following project conventions in CLAUDE.md."
+          fi
+
+          OUTPUT=$(claude --print "$PROMPT" 2>&1) || true
+
+          echo "output<<EOF" >> $GITHUB_OUTPUT
+          echo "$OUTPUT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Commit and push changes
+        if: contains(fromJSON('["implement", "full"]'), steps.parse.outputs.phase)
+        run: |
+          git add -A
+
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "feat: implement issue #${{ github.event.issue.number }}
+
+            ${{ github.event.issue.title }}
+
+            Implemented by Claude Code via PIV Loop workflow.
+
+            Closes #${{ github.event.issue.number }}"
+
+            git push -u origin ${{ steps.parse.outputs.branch }}
+          fi
+
+      - name: Post implement results
+        if: contains(fromJSON('["implement", "full"]'), steps.parse.outputs.phase)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const output = `${{ steps.implement.outputs.output }}`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `## Implement Phase Complete\n\n${output.substring(0, 60000)}`
+            });
+
+      # VERIFY PHASE
+      - name: Verify phase
+        id: verify
+        if: contains(fromJSON('["verify", "full"]'), steps.parse.outputs.phase)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          PROMPT="Verify the implementation:
+
+          1. Run type checking: uv run mypy app/ && uv run pyright app/
+          2. Run linting: uv run ruff check .
+          3. Run tests: uv run pytest -v
+
+          Report any failures and attempt to fix them.
+          Use /validation:code-review to review the changes."
+
+          OUTPUT=$(claude --print "$PROMPT" 2>&1) || true
+
+          echo "output<<EOF" >> $GITHUB_OUTPUT
+          echo "$OUTPUT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Post verify results
+        if: contains(fromJSON('["verify", "full"]'), steps.parse.outputs.phase)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const output = `${{ steps.verify.outputs.output }}`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `## Verify Phase Complete\n\n${output.substring(0, 60000)}`
+            });
+
+      # CREATE PR
+      - name: Create Pull Request
+        if: steps.parse.outputs.phase == 'full'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="${{ steps.parse.outputs.branch }}"
+          ISSUE_NUMBER="${{ github.event.issue.number }}"
+          ISSUE_TITLE="${{ github.event.issue.title }}"
+
+          # Check if PR already exists
+          EXISTING_PR=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number')
+
+          if [ -n "$EXISTING_PR" ]; then
+            echo "PR #$EXISTING_PR already exists for branch $BRANCH"
+            echo "pr_number=$EXISTING_PR" >> $GITHUB_OUTPUT
+          else
+            # Create new PR
+            PR_URL=$(gh pr create \
+              --title "$ISSUE_TITLE" \
+              --body "## Summary
+            Implements #$ISSUE_NUMBER
+
+            ## Changes
+            See commit history for detailed changes.
+
+            ## Verification
+            - [ ] Type checking passes
+            - [ ] Linting passes
+            - [ ] Tests pass
+            - [ ] Code review complete
+
+            ---
+            Automated PR created by PIV Loop workflow." \
+              --base main \
+              --head "$BRANCH")
+
+            echo "Created PR: $PR_URL"
+          fi
+
+      - name: Post completion summary
+        if: steps.parse.outputs.phase == 'full'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const branch = `${{ steps.parse.outputs.branch }}`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `## PIV Loop Complete
+
+            The Plan-Implement-Verify cycle has completed.
+
+            **Branch:** \`${branch}\`
+
+            A Pull Request has been created for review. Please check the PR for:
+            - Code correctness
+            - Test coverage
+            - Documentation updates
+
+            If changes are needed, comment on the PR with \`/agent fix <description>\`.`
+            });
