@@ -18,6 +18,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from app.agent.routes import router as agent_router
+from app.conversations.routes import router as conversations_router
 from app.core.agents import tool_registry as _  # noqa: F401  # Register agent tools
 from app.core.config import get_settings
 from app.core.database import engine
@@ -79,6 +80,7 @@ setup_exception_handlers(app)
 # Include routers
 app.include_router(health_router)
 app.include_router(agent_router)
+app.include_router(conversations_router)
 app.include_router(openai_compat_router)
 
 

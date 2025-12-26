@@ -15,19 +15,28 @@ import time
 import uuid
 from collections.abc import AsyncGenerator, Sequence
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic_ai import Agent
 from pydantic_ai.messages import (
     ModelMessage,
+    ModelRequest,
+    ModelResponse,
     PartDeltaEvent,
     PartStartEvent,
     TextPart,
     TextPartDelta,
+    UserPromptPart,
 )
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.conversations import service as conversation_service
+from app.conversations.models import Conversation
+from app.conversations.schemas import ConversationCreate, MessageCreate
 from app.core.agents import AgentDeps, vault_agent
 from app.core.config import get_settings
+from app.core.database import get_db
+from app.core.exceptions import NotFoundError
 from app.core.logging import get_logger
 from app.openai_compat.converters import convert_to_pydantic_messages
 from app.openai_compat.models import (
@@ -92,18 +101,25 @@ async def stream_agent_text(
 
 async def stream_openai_response(
     request: ChatCompletionRequest,
+    conversation: Conversation,
+    loaded_history: list[ModelMessage],
+    db: AsyncSession,
 ) -> AsyncGenerator[str, None]:
-    """Generate OpenAI-compatible SSE streaming response.
+    """Generate OpenAI-compatible SSE streaming response with conversation persistence.
 
     This function orchestrates the streaming workflow:
-    1. Convert OpenAI messages to Pydantic AI format
+    1. Convert OpenAI messages to Pydantic AI format and merge with loaded history
     2. Stream text deltas from the agent
     3. Build and format OpenAI chunks
     4. Send final chunk with usage statistics
     5. Send termination signal
+    6. Save conversation messages to database
 
     Args:
         request: OpenAI-compatible chat completion request.
+        conversation: Conversation instance for persistence.
+        loaded_history: Pre-loaded message history from database.
+        db: Database session for saving messages.
 
     Yields:
         SSE-formatted chunks as strings.
@@ -125,18 +141,26 @@ async def stream_openai_response(
 
     try:
         # Convert OpenAI messages to Pydantic AI format
-        user_prompt, message_history = convert_to_pydantic_messages(request.messages)
+        user_prompt, client_history = convert_to_pydantic_messages(request.messages)
 
-        # Track token usage (we'll get this from run.usage() later)
+        # Merge loaded history + client history
+        merged_history = (
+            loaded_history + list(client_history)
+            if loaded_history and client_history
+            else loaded_history or (list(client_history) if client_history else [])
+        )
+
+        # Track token usage and streamed content
         prompt_tokens = 0
         completion_tokens = 0
+        streamed_content: list[str] = []  # Accumulate for persistence
 
         # Stream text deltas from agent
         settings = get_settings()
         vault_manager = VaultManager(settings.obsidian_vault_path)
         async with vault_agent.iter(
             user_prompt,
-            message_history=message_history,
+            message_history=merged_history,
             deps=AgentDeps(vault_manager=vault_manager, settings=settings),
         ) as run:
             # Send empty role chunk FIRST (OpenAI SSE spec requirement)
@@ -157,6 +181,7 @@ async def stream_openai_response(
                             # Handle initial text part (contains first chunk)
                             if isinstance(event, PartStartEvent):
                                 if isinstance(event.part, TextPart) and event.part.content:
+                                    streamed_content.append(event.part.content)
                                     chunk = builder.build_content_chunk(event.part.content)
                                     logger.debug(
                                         "agent.stream.chunk_sending",
@@ -169,6 +194,7 @@ async def stream_openai_response(
                             elif isinstance(event, PartDeltaEvent):
                                 if isinstance(event.delta, TextPartDelta):
                                     if event.delta.content_delta:
+                                        streamed_content.append(event.delta.content_delta)
                                         chunk = builder.build_content_chunk(
                                             event.delta.content_delta
                                         )
@@ -183,6 +209,7 @@ async def stream_openai_response(
                     # CallToolsNode emits tool call/result events, not text events
                     # We'll just insert newlines for visual separation after tool execution
                     # Text content comes from subsequent ModelRequestNode, not CallToolsNode
+                    streamed_content.append("\n\n")
                     newline_chunk = builder.build_content_chunk("\n\n")
                     logger.debug(
                         "agent.stream.chunk_sending",
@@ -205,6 +232,43 @@ async def stream_openai_response(
         # Send termination signal
         yield "data: [DONE]\n\n"
 
+        # Save messages to database after streaming completes
+        full_response = "".join(streamed_content)
+
+        # 1. Save user message
+        await conversation_service.add_message(
+            db,
+            MessageCreate(
+                conversation_id=conversation.id,
+                role="user",
+                content=user_prompt,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=None,
+            ),
+        )
+
+        # 2. Auto-title if first message
+        if conversation.title is None:
+            await conversation_service.auto_generate_title(db, conversation.id, user_prompt)
+
+        # 3. Save assistant message
+        await conversation_service.add_message(
+            db,
+            MessageCreate(
+                conversation_id=conversation.id,
+                role="assistant",
+                content=full_response,
+                prompt_tokens=None,
+                completion_tokens=completion_tokens,
+            ),
+        )
+
+        logger.info(
+            "conversations.messages_saved",
+            conversation_id=conversation.id,
+            session_id=conversation.session_id,
+        )
+
         duration_ms = (time.time() - start_time) * 1000
         logger.info(
             "agent.stream_completed",
@@ -213,6 +277,7 @@ async def stream_openai_response(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             duration_ms=round(duration_ms, 2),
+            conversation_id=conversation.id,
         )
 
     except Exception as e:
@@ -240,18 +305,23 @@ async def stream_openai_response(
 @router.post("/chat/completions", response_model=None)
 async def chat_completions(
     request: ChatCompletionRequest,
-) -> StreamingResponse | ChatCompletionResponse:
-    """OpenAI-compatible chat completions endpoint.
+    conversation_id: str | None = Header(None, alias="X-Conversation-ID"),
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse | ChatCompletionResponse | Response:
+    """OpenAI-compatible chat completions endpoint with conversation persistence.
 
     Implements the OpenAI Chat Completions API specification with support
-    for both streaming and non-streaming modes.
+    for both streaming and non-streaming modes. Automatically loads and saves
+    conversation history when X-Conversation-ID header is provided.
 
     Args:
         request: Chat completion request with messages and parameters.
+        conversation_id: Optional conversation session ID from X-Conversation-ID header.
+        db: Database session for conversation persistence.
 
     Returns:
         StreamingResponse for streaming mode (stream=true).
-        ChatCompletionResponse for non-streaming mode (stream=false).
+        ChatCompletionResponse or Response for non-streaming mode (stream=false).
 
     Raises:
         HTTPException: 400 if messages list is empty.
@@ -279,31 +349,116 @@ async def chat_completions(
         model=request.model,
         message_count=len(request.messages),
         stream=request.stream,
+        conversation_id=conversation_id,
     )
+
+    # Handle conversation persistence
+    conversation: Conversation
+    loaded_history: list[ModelMessage] = []
+
+    if conversation_id:
+        # Load existing conversation or create new with provided session_id
+        try:
+            conversation = await conversation_service.get_conversation_by_session_id(
+                db, conversation_id, include_messages=True
+            )
+
+            # Convert stored messages to Pydantic AI format
+            for msg in conversation.messages:
+                if msg.role == "user":
+                    loaded_history.append(ModelRequest(parts=[UserPromptPart(content=msg.content)]))
+                elif msg.role == "assistant":
+                    loaded_history.append(ModelResponse(parts=[TextPart(content=msg.content)]))
+
+            logger.info(
+                "conversations.history_loaded",
+                conversation_id=conversation.id,
+                session_id=conversation.session_id,
+                message_count=len(loaded_history),
+            )
+        except NotFoundError:
+            logger.warning(
+                "conversations.not_found", session_id=conversation_id, action="creating_new"
+            )
+            # Create new conversation with provided session_id
+            conversation = await conversation_service.create_conversation(
+                db, ConversationCreate(session_id=conversation_id)
+            )
+    else:
+        # Create new conversation with auto-generated session_id
+        conversation = await conversation_service.create_conversation(db, ConversationCreate())
+        logger.info(
+            "conversations.created_new",
+            conversation_id=conversation.id,
+            session_id=conversation.session_id,
+        )
 
     # Streaming mode
     if request.stream:
         return StreamingResponse(
-            stream_openai_response(request),
+            stream_openai_response(request, conversation, loaded_history, db),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
+                "X-Conversation-ID": conversation.session_id,
             },
         )
 
     # Non-streaming mode
     start_time = time.time()
     try:
-        # Convert messages and run agent
-        user_prompt, message_history = convert_to_pydantic_messages(request.messages)
+        # Convert messages and merge with loaded history
+        user_prompt, client_history = convert_to_pydantic_messages(request.messages)
+        merged_history = (
+            loaded_history + list(client_history)
+            if loaded_history and client_history
+            else loaded_history or (list(client_history) if client_history else [])
+        )
+
+        # Run agent
         settings = get_settings()
         vault_manager = VaultManager(settings.obsidian_vault_path)
         result = await vault_agent.run(
             user_prompt,
-            message_history=message_history,
+            message_history=merged_history,
             deps=AgentDeps(vault_manager=vault_manager, settings=settings),
+        )
+
+        # Save messages to database
+        # 1. Save user message
+        await conversation_service.add_message(
+            db,
+            MessageCreate(
+                conversation_id=conversation.id,
+                role="user",
+                content=user_prompt,
+                prompt_tokens=result.usage().input_tokens,
+                completion_tokens=None,
+            ),
+        )
+
+        # 2. Auto-title if first message
+        if conversation.title is None:
+            await conversation_service.auto_generate_title(db, conversation.id, user_prompt)
+
+        # 3. Save assistant message
+        await conversation_service.add_message(
+            db,
+            MessageCreate(
+                conversation_id=conversation.id,
+                role="assistant",
+                content=result.output,
+                prompt_tokens=None,
+                completion_tokens=result.usage().output_tokens,
+            ),
+        )
+
+        logger.info(
+            "conversations.messages_saved",
+            conversation_id=conversation.id,
+            session_id=conversation.session_id,
         )
 
         duration_ms = (time.time() - start_time) * 1000
@@ -314,11 +469,12 @@ async def chat_completions(
             prompt_tokens=result.usage().input_tokens,
             completion_tokens=result.usage().output_tokens,
             duration_ms=round(duration_ms, 2),
+            conversation_id=conversation.id,
         )
 
         # Build OpenAI response
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
-        response = ChatCompletionResponse(
+        response_data = ChatCompletionResponse(
             id=completion_id,
             created=int(time.time()),
             model=request.model,
@@ -344,9 +500,15 @@ async def chat_completions(
             endpoint="/v1/chat/completions",
             status_code=200,
             duration_ms=round(duration_ms, 2),
+            conversation_id=conversation.id,
         )
 
-        return response
+        # Return response with X-Conversation-ID header
+        return Response(
+            content=response_data.model_dump_json(),
+            media_type="application/json",
+            headers={"X-Conversation-ID": conversation.session_id},
+        )
 
     except Exception as e:
         duration_ms = (time.time() - start_time) * 1000
