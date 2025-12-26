@@ -13,7 +13,7 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-class TZDateTime(TypeDecorator):  # type: ignore[misc]
+class TZDateTime(TypeDecorator[datetime]):
     """Custom DateTime type that ensures timezone-aware datetimes.
 
     This handles the fact that SQLite doesn't preserve timezone info

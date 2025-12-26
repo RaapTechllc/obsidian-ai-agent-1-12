@@ -3,6 +3,7 @@
 import sqlite3
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -42,7 +43,7 @@ sqlite3.register_adapter(datetime, adapt_datetime_iso)
 sqlite3.register_converter("timestamp", convert_datetime)
 
 # Configure engine with SQLite-specific settings
-engine_kwargs = {
+engine_kwargs: dict[str, Any] = {
     "pool_pre_ping": True,
     "pool_size": 5,
     "max_overflow": 10,
