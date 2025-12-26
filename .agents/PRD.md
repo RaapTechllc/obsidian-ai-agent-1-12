@@ -60,18 +60,25 @@ Build a production-ready AI agent that makes Obsidian vault management intuitive
 - ✅ Obsidian Copilot plugin as frontend
 - ✅ CORS configuration for Obsidian app protocol
 
+**Persistence:**
+- ✅ PostgreSQL database for conversation history
+- ✅ Auto-load conversation history via X-Conversation-ID header
+- ✅ Full CRUD API endpoints for conversation management
+- ✅ Auto-generated conversation titles from first message
+- ✅ Message persistence for both streaming and non-streaming modes
+
 **Deployment:**
 - ✅ Docker containerization for isolated deployment
 - ✅ Docker Compose for orchestration
 - ✅ Volume mounting for vault access
+- ✅ Database migrations with Alembic
 
 ### Out of Scope (Future Considerations)
 
 - ❌ Cloud hosting or SaaS deployment
 - ❌ User authentication beyond API keys
 - ❌ Multi-user support
-- ❌ Database for conversation persistence (future enhancement)
-- ❌ Advanced features: embeddings, semantic indexing, RAG (post-MVP)
+- ❌ Advanced features: embeddings, semantic indexing, RAG
 - ❌ Support for other note-taking apps (Notion, Logseq, etc.)
 - ❌ Obsidian plugin development (using existing Copilot plugin)
 - ❌ Mobile support
@@ -518,9 +525,11 @@ Access-Control-Allow-Headers: Content-Type, Authorization
 
 ## Future Considerations (Post-MVP)
 
-**Potential Enhancements:**
-- Conversation history persistence (SQLite/PostgreSQL)
-- Streaming responses (SSE) for better UX
+**Completed Enhancements:**
+- ✅ Conversation history persistence (PostgreSQL)
+- ✅ Streaming responses (SSE) for better UX
+
+**Potential Future Enhancements:**
 - Semantic embeddings for improved search
 - RAG implementation for large vaults
 - Task extraction and management
@@ -529,6 +538,8 @@ Access-Control-Allow-Headers: Content-Type, Authorization
 - Web UI for configuration
 - Multi-vault support
 - Kubernetes deployment manifests
+- Advanced conversation search and filtering
+- Conversation export/import functionality
 
 **Integration Opportunities:**
 - Obsidian Local REST API plugin (for advanced features)

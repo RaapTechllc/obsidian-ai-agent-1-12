@@ -46,10 +46,11 @@ Visit `http://localhost:8123/docs` for API documentation.
 **Core Infrastructure**
 
 - FastAPI with async/await
-- PostgreSQL (optional, for conversation history)
+- PostgreSQL for conversation history persistence
 - SQLAlchemy + Alembic migrations
 - Pydantic Settings with .env support
 - Vertical Slice Architecture
+- Streaming responses via Server-Sent Events (SSE)
 
 **AI Optimized Codebase**
 
@@ -68,6 +69,8 @@ Visit `http://localhost:8123/docs` for API documentation.
 - Note creation, updating, appending
 - Bulk operations (tagging, moving, organizing)
 - Folder management
+- Conversation history persistence and management
+- Auto-generated conversation titles
 
 ## Project Structure
 
@@ -82,8 +85,14 @@ app/
 │   └── vault/         # Vault access layer
 │       ├── manager.py # File operations
 │       └── models.py  # Domain models
-├── features/          # Vertical slices
-│   ├── chat/          # OpenAI-compatible chat endpoint
+├── conversations/     # Conversation persistence
+│   ├── models.py      # SQLAlchemy models
+│   ├── schemas.py     # Pydantic schemas
+│   ├── routes.py      # CRUD API endpoints
+│   └── service.py     # Business logic
+├── openai_compat/     # OpenAI compatibility layer
+│   └── routes.py      # /v1/chat/completions endpoint
+├── features/          # Agent tools (vertical slices)
 │   ├── vault_query/   # Discovery & search tool
 │   ├── vault_context/ # Context-aware reading tool
 │   └── vault_management/ # Modification operations tool
@@ -105,13 +114,14 @@ LLM_API_KEY=sk-ant-...        # Your provider API key
 OBSIDIAN_VAULT_PATH=/absolute/path/to/your/vault
 ```
 
-**Optional: PostgreSQL (for conversation history)**
+**PostgreSQL Database (for conversation history)**
 
 ```bash
 # Docker (default)
 DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5433/obsidian_db
 
 # Cloud Providers: Any Postgres instance is supported!
+# Use DATABASE_URL=sqlite+aiosqlite:///./paddy.db for SQLite (development only)
 ```
 
 ## Commands
