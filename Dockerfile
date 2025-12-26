@@ -33,22 +33,46 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Stage 2: Runtime - Minimal production image
 FROM python:3.12-slim-bookworm
 
+# Build arguments for versioning
+ARG VERSION=dev
+ARG COMMIT_SHA=unknown
+
 # Set working directory
 WORKDIR /app
 
+# Create non-root user for security
+RUN groupadd -r appuser && useradd -r -g appuser -u 1000 appuser
+
+# Install curl for healthcheck
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy only the virtual environment from builder
 # This significantly reduces the final image size
-COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
 
 # Copy application code
-COPY . .
+COPY --chown=appuser:appuser . .
 
 # Ensure the virtual environment is used
 ENV PATH="/app/.venv/bin:$PATH"
 
-# Expose port (adjust if your app uses a different port)
+# Set version metadata
+ENV VERSION=${VERSION} \
+    COMMIT_SHA=${COMMIT_SHA}
+
+# Create vault mount point and ensure permissions
+RUN mkdir -p /vault && chown appuser:appuser /vault
+
+# Switch to non-root user
+USER appuser
+
+# Expose port
 EXPOSE 8123
 
-# Run the application
-# Adjust the module/script name based on your entry point
-CMD ["python", "-m", "app.main"]
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8123/health || exit 1
+
+# Run the application with uvicorn
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8123"]

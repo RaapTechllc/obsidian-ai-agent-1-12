@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  app:
+    image: ${DOCKER_IMAGE:-obsidian-ai-agent:latest}
+    container_name: obsidian-ai-agent
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-8123}:8123"
+    volumes:
+      - ${OBSIDIAN_VAULT_PATH}:/vault:rw
+    environment:
+      # LLM Configuration
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - LLM_MODEL=${LLM_MODEL:-claude-haiku-4-5}
+
+      # Database
+      - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD}@db:5432/obsidian_db
+
+      # Vault
+      - OBSIDIAN_VAULT_PATH=/vault
+
+      # Application
+      - ENVIRONMENT=production
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-["http://localhost:3000"]}
+
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - obsidian-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8123/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 40s
+
+  db:
+    image: postgres:15-alpine
+    container_name: obsidian-ai-agent-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=obsidian_db
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --lc-collate=C --lc-ctype=C
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - obsidian-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "5434:5432"  # Expose on non-standard port to avoid conflicts
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  obsidian-network:
+    driver: bridge
