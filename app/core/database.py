@@ -1,6 +1,8 @@
 """Database configuration and session management."""
 
+import sqlite3
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -13,22 +15,48 @@ from app.core.config import get_settings
 
 settings = get_settings()
 
-# Force SQLite for development (reliable fallback)
-database_url = "sqlite+aiosqlite:///./obsidian_agent.db"
+# Get database URL from settings
+database_url = settings.database_url
+if database_url.startswith("postgresql://"):
+    database_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
 
-# Original configuration (commented out - environment was caching PostgreSQL):
-# database_url = settings.database_url
-# if database_url.startswith("postgresql://"):
-#     database_url = database_url.replace("postgresql://", "postgresql+asyncpg://")
+
+# SQLite timezone handling - register adapters globally
+def adapt_datetime_iso(val: datetime) -> str:
+    """Convert datetime to ISO string for SQLite storage."""
+    return val.isoformat()
+
+
+def convert_datetime(val: bytes) -> datetime:
+    """Convert stored datetime back to timezone-aware datetime."""
+    dt_str = val.decode("utf-8")
+    dt = datetime.fromisoformat(dt_str)
+    # Ensure timezone-aware (default to UTC if naive)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt
+
+
+# Register SQLite adapters/converters for timezone-aware datetimes
+sqlite3.register_adapter(datetime, adapt_datetime_iso)
+sqlite3.register_converter("timestamp", convert_datetime)
+
+# Configure engine with SQLite-specific settings
+engine_kwargs = {
+    "pool_pre_ping": True,
+    "pool_size": 5,
+    "max_overflow": 10,
+    "echo": settings.environment == "development",
+}
+
+# For SQLite, enable datetime parsing
+if "sqlite" in database_url:
+    engine_kwargs["connect_args"] = {
+        "detect_types": sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES
+    }
 
 # Create async engine with connection pooling
-engine = create_async_engine(
-    database_url,
-    pool_pre_ping=True,  # Test connections before using
-    pool_size=5,
-    max_overflow=10,
-    echo=settings.environment == "development",  # Log SQL in development
-)
+engine = create_async_engine(database_url, **engine_kwargs)
 
 # Create async session factory
 AsyncSessionLocal = async_sessionmaker(

@@ -6,8 +6,8 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: obsidian_db
     ports:
-      # Use port 5433 on host to avoid conflicts with local PostgreSQL on standard port 5432
-      - "5433:5432"
+      # Use port 5434 on host to avoid conflicts with other Docker PostgreSQL containers
+      - "5434:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -22,9 +22,9 @@ services:
       context: .
       dockerfile: Dockerfile
 
-    # Port mapping
+    # Port mapping (using 8124 to avoid conflict with ClickHouse on 8123)
     ports:
-      - "8123:8123"
+      - "8124:8123"
 
     # Volume mounts for development
     # Sync project files but preserve container's .venv
